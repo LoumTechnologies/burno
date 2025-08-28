@@ -1,6 +1,92 @@
-import { app, BrowserWindow } from 'electron';
-import path from 'node:path';
 import started from 'electron-squirrel-startup';
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import path from 'path';
+import { exec, spawn } from 'child_process';
+import util from 'util';
+import fs from 'fs';
+
+// Promisify exec for commands that don't need streaming output
+const execPromise = util.promisify(exec);
+
+// --- Define paths to our bundled tools ---
+// This logic correctly finds the binaries whether in development or a packaged app
+const resourcesPath = app.isPackaged
+  ? path.join(process.resourcesPath, 'resources')
+  : path.join(__dirname, '..', 'resources');
+
+const ffmpegPath = path.join(resourcesPath, 'bin', 'ffmpeg');
+const dvdauthorPath = path.join(resourcesPath, 'bin', 'dvdauthor');
+const mkisofsPath = path.join(resourcesPath, 'bin', 'mkisofs');
+
+
+// Main function that handles the entire DVD burning process
+ipcMain.handle('burn-dvd', async () => {
+  // 1. Select Video File
+  const fileResult = await dialog.showOpenDialog({
+    title: 'Select a Video File',
+    properties: ['openFile'],
+    filters: [{ name: 'Movies', extensions: ['mp4', 'mov', 'mkv', 'avi'] }],
+  });
+
+  if (fileResult.canceled || fileResult.filePaths.length === 0) {
+    return { success: false, error: 'File selection was canceled.' };
+  }
+  const videoFile = fileResult.filePaths[0];
+
+  // 2. Select DVD Drive
+  let chosenDrive: string;
+  try {
+    const { stdout } = await execPromise("drutil list | grep -o '/dev/disk[0-9]*'");
+    const drives = stdout.trim().split('\n');
+    if (drives.length === 0 || drives[0] === '') {
+      throw new Error('No DVD drive found.');
+    }
+
+    const driveChoice = await dialog.showMessageBox({
+      type: 'question',
+      title: 'Choose Drive',
+      message: 'Please select your DVD burner:',
+      buttons: [...drives, 'Cancel'],
+      defaultId: 0,
+      cancelId: drives.length,
+    });
+
+    if (driveChoice.response === drives.length) {
+      return { success: false, error: 'Drive selection was canceled.' };
+    }
+    chosenDrive = drives[driveChoice.response];
+  } catch (e) {
+    return { success: false, error: `Could not find a DVD drive: ${e.message}` };
+  }
+
+  // 3. Run the process
+  try {
+    // Create a temporary directory
+    const tmpDir = fs.mkdtempSync(path.join(app.getPath('temp'), 'dvd-'));
+    const dvdMpegFile = path.join(tmpDir, 'video.mpg');
+    const dvdFolder = path.join(tmpDir, 'dvd_content');
+    const isoFile = path.join(tmpDir, 'output.iso');
+
+    // Helper to run a command and return a promise
+    const runCommand = (command, args) => new Promise((resolve, reject) => {
+        const process = spawn(command, args);
+        process.stderr.on('data', (data) => console.error(data.toString())); // Log errors
+        process.on('close', (code) => code === 0 ? resolve(true) : reject(new Error(`Process exited with code ${code}`)));
+    });
+
+    await runCommand(ffmpegPath, ['-i', videoFile, '-target', 'ntsc-dvd', '-aspect', '16:9', '-y', dvdMpegFile]);
+    await runCommand(dvdauthorPath, ['-o', dvdFolder, '-t', dvdMpegFile]);
+    await runCommand(mkisofsPath, ['-dvd-video', '-o', isoFile, dvdFolder]);
+    await runCommand('hdiutil', ['burn', '-device', chosenDrive, isoFile]);
+
+    // Clean up temporary files
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    
+    return { success: true, log: `Successfully burned ${path.basename(videoFile)} to ${chosenDrive}.` };
+  } catch (e) {
+    return { success: false, error: `An error occurred during the process: ${e.message}` };
+  }
+});
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {

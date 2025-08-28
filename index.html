@@ -1,13 +1,16 @@
 <!DOCTYPE html>
 <html>
-  <head>
+<head>
     <meta charset="UTF-8" />
-    <title>Hello World!</title>
-
-  </head>
-  <body>
-    <h1>💖 Hello World!</h1>
-    <p>Welcome to your Electron application.</p>
+    <title>Burno</title>
+</head>
+<body>
+    <h1>Burno - Burn Video to DVD</h1>
+    <p>Select a video file and a DVD drive to begin.</p>
+    <button id="select-file-btn">Select Video File</button>
+    <hr />
+    <p><strong>Status:</strong> <span id="status-text">Idle</span></p>
+    <pre id="log-output"></pre>
     <script type="module" src="/src/renderer.ts"></script>
-  </body>
+</body>
 </html>

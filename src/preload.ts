@@ -1,2 +1,8 @@
-// See the Electron documentation for details on how to use preload scripts:
-// https://www.electronjs.org/docs/latest/tutorial/process-model#preload-scripts
+import { contextBridge, ipcRenderer } from 'electron';
+
+// Expose a safe, limited API to the renderer process
+contextBridge.exposeInMainWorld('api', {
+  // The UI can call window.api.burnDVD() to trigger the backend logic
+  burnDVD: (): Promise<{ success: boolean; log?: string; error?: string }> => 
+    ipcRenderer.invoke('burn-dvd'),
+});
