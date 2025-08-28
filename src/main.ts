@@ -76,16 +76,48 @@ ipcMain.handle('burn-dvd', async (_event, { isoOnly = false } = {}) => {
       process.on('close', (code) => code === 0 ? resolve(true) : reject(new Error(`Process exited with code ${code}`)));
     });
 
+    // Helper to get video info using ffprobe
+    const getVideoFormat = async (videoPath: string): Promise<'ntsc' | 'pal'> => {
+      const ffprobePath = path.join(resourcesPath, 'bin', 'ffprobe');
+      try {
+        const { stdout } = await execPromise(`${ffprobePath} -v error -select_streams v:0 -show_entries stream=height,r_frame_rate -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`);
+        const [heightStr, frStr] = stdout.trim().split('\n');
+        const height = parseInt(heightStr, 10);
+        const [num, denom] = frStr.split('/').map(Number);
+        const fps = denom ? num / denom : num;
+        if (height >= 570 || Math.abs(fps - 25) < 0.5) return 'pal';
+        return 'ntsc';
+      } catch (e) {
+        // Default to NTSC if detection fails
+        return 'ntsc';
+      }
+    };
+
+    const videoFormat = await getVideoFormat(videoFile);
+
     // Remove trailing slash from dvdFolder if present
     let sanitizedDvdFolder = dvdFolder;
     if (sanitizedDvdFolder.endsWith('/')) {
       sanitizedDvdFolder = sanitizedDvdFolder.slice(0, -1);
     }
 
-    await runCommand(ffmpegPath, ['-i', videoFile, '-target', 'ntsc-dvd', '-aspect', '16:9', '-y', dvdMpegFile]);
-    await runCommand(dvdauthorPath, ['-o', dvdFolder, '-t', dvdMpegFile]);
-    // Finalize DVD structure to create VIDEO_TS.IFO
-    await runCommand(dvdauthorPath, ['-o', dvdFolder]);
+    await runCommand(ffmpegPath, ['-i', videoFile, '-target', `${videoFormat}-dvd`, '-aspect', '16:9', '-y', dvdMpegFile]);
+    await runCommand(dvdauthorPath, ['-t', dvdMpegFile, '-v', videoFormat, '-o', dvdFolder]);
+
+    // Check for VTS_01_0.IFO after first dvdauthor call
+    const vtsIfo = path.join(dvdFolder, 'VIDEO_TS', 'VTS_01_0.IFO');
+    if (!fs.existsSync(vtsIfo)) {
+      throw new Error(`DVD title creation failed: ${vtsIfo} not found. dvdauthor may have failed. Check the logs above for errors.`);
+    }
+
+    // Finalize DVD structure to create VIDEO_TS.IFO, specifying video format for VMGM via env var
+    await new Promise((resolve, reject) => {
+      console.log(`Running command: ${dvdauthorPath} -o ${dvdFolder} -T (VIDEO_FORMAT=${videoFormat})`);
+      const child = spawn(dvdauthorPath, ['-o', dvdFolder, '-T'], { env: { ...process.env, VIDEO_FORMAT: videoFormat } });
+      child.stdout.on('data', (data: Buffer) => console.log(data.toString()));
+      child.stderr.on('data', (data: Buffer) => console.error(data.toString()));
+      child.on('close', (code: number) => code === 0 ? resolve(true) : reject(new Error(`Process exited with code ${code}`)));
+    });
 
     // Check for VIDEO_TS/VIDEO_TS.IFO before running mkisofs
     const videoTsIfo = path.join(dvdFolder, 'VIDEO_TS', 'VIDEO_TS.IFO');
