@@ -12,7 +12,7 @@ const execPromise = util.promisify(exec);
 // This logic correctly finds the binaries whether in development or a packaged app
 const resourcesPath = app.isPackaged
   ? path.join(process.resourcesPath, 'resources')
-  : path.join(__dirname, '..', 'resources');
+  : path.join(app.getAppPath(), 'resources');
 
 const ffmpegPath = path.join(resourcesPath, 'bin', 'ffmpeg');
 const dvdauthorPath = path.join(resourcesPath, 'bin', 'dvdauthor');
@@ -67,16 +67,33 @@ ipcMain.handle('burn-dvd', async (_event, { isoOnly = false } = {}) => {
     const dvdFolder = path.join(tmpDir, 'dvd_content');
     const isoFile = path.join(tmpDir, 'output.iso');
 
-    // Helper to run a command and return a promise
+    // Helper to run a command and return a promise, logging both stdout and stderr
     const runCommand = (command: string, args: string[]): Promise<boolean> => new Promise((resolve, reject) => {
+      console.log(`Running command: ${command} ${args.join(' ')}`);
       const process = spawn(command, args);
+      process.stdout.on('data', (data) => console.log(data.toString()));
       process.stderr.on('data', (data) => console.error(data.toString()));
       process.on('close', (code) => code === 0 ? resolve(true) : reject(new Error(`Process exited with code ${code}`)));
     });
 
+    // Remove trailing slash from dvdFolder if present
+    let sanitizedDvdFolder = dvdFolder;
+    if (sanitizedDvdFolder.endsWith('/')) {
+      sanitizedDvdFolder = sanitizedDvdFolder.slice(0, -1);
+    }
+
     await runCommand(ffmpegPath, ['-i', videoFile, '-target', 'ntsc-dvd', '-aspect', '16:9', '-y', dvdMpegFile]);
     await runCommand(dvdauthorPath, ['-o', dvdFolder, '-t', dvdMpegFile]);
-    await runCommand(mkisofsPath, ['-dvd-video', '-o', isoFile, dvdFolder]);
+    // Finalize DVD structure to create VIDEO_TS.IFO
+    await runCommand(dvdauthorPath, ['-o', dvdFolder]);
+
+    // Check for VIDEO_TS/VIDEO_TS.IFO before running mkisofs
+    const videoTsIfo = path.join(dvdFolder, 'VIDEO_TS', 'VIDEO_TS.IFO');
+    if (!fs.existsSync(videoTsIfo)) {
+      throw new Error(`DVD structure incomplete: ${videoTsIfo} not found. dvdauthor may have failed. Check the logs above for errors.`);
+    }
+
+    await runCommand(mkisofsPath, ['-dvd-video', '-o', isoFile, sanitizedDvdFolder]);
 
     if (isoOnly || noDrive) {
       // Only generate ISO, do not burn
