@@ -18,9 +18,8 @@ const ffmpegPath = path.join(resourcesPath, 'bin', 'ffmpeg');
 const dvdauthorPath = path.join(resourcesPath, 'bin', 'dvdauthor');
 const mkisofsPath = path.join(resourcesPath, 'bin', 'mkisofs');
 
-
 // Main function that handles the entire DVD burning process
-ipcMain.handle('burn-dvd', async () => {
+ipcMain.handle('burn-dvd', async (_event, { isoOnly = false } = {}) => {
   // 1. Select Video File
   const fileResult = await dialog.showOpenDialog({
     title: 'Select a Video File',
@@ -33,30 +32,31 @@ ipcMain.handle('burn-dvd', async () => {
   }
   const videoFile = fileResult.filePaths[0];
 
-  // 2. Select DVD Drive
-  let chosenDrive: string;
-  try {
-    const { stdout } = await execPromise("drutil list | grep -o '/dev/disk[0-9]*'");
-    const drives = stdout.trim().split('\n');
-    if (drives.length === 0 || drives[0] === '') {
-      throw new Error('No DVD drive found.');
+  // 2. Try to select DVD Drive (unless isoOnly)
+  let chosenDrive: string | undefined;
+  let noDrive = false;
+  if (!isoOnly) {
+    try {
+      const { stdout } = await execPromise("drutil list | grep -o '/dev/disk[0-9]*'");
+      const drives = stdout.trim().split('\n');
+      if (drives.length === 0 || drives[0] === '') {
+        throw new Error('No DVD drive found.');
+      }
+      const driveChoice = await dialog.showMessageBox({
+        type: 'question',
+        title: 'Choose Drive',
+        message: 'Please select your DVD burner:',
+        buttons: [...drives, 'Cancel'],
+        defaultId: 0,
+        cancelId: drives.length,
+      });
+      if (driveChoice.response === drives.length) {
+        return { success: false, error: 'Drive selection was canceled.' };
+      }
+      chosenDrive = drives[driveChoice.response];
+    } catch (e) {
+      noDrive = true;
     }
-
-    const driveChoice = await dialog.showMessageBox({
-      type: 'question',
-      title: 'Choose Drive',
-      message: 'Please select your DVD burner:',
-      buttons: [...drives, 'Cancel'],
-      defaultId: 0,
-      cancelId: drives.length,
-    });
-
-    if (driveChoice.response === drives.length) {
-      return { success: false, error: 'Drive selection was canceled.' };
-    }
-    chosenDrive = drives[driveChoice.response];
-  } catch (e) {
-    return { success: false, error: `Could not find a DVD drive: ${e.message}` };
   }
 
   // 3. Run the process
@@ -68,21 +68,35 @@ ipcMain.handle('burn-dvd', async () => {
     const isoFile = path.join(tmpDir, 'output.iso');
 
     // Helper to run a command and return a promise
-    const runCommand = (command, args) => new Promise((resolve, reject) => {
-        const process = spawn(command, args);
-        process.stderr.on('data', (data) => console.error(data.toString())); // Log errors
-        process.on('close', (code) => code === 0 ? resolve(true) : reject(new Error(`Process exited with code ${code}`)));
+    const runCommand = (command: string, args: string[]): Promise<boolean> => new Promise((resolve, reject) => {
+      const process = spawn(command, args);
+      process.stderr.on('data', (data) => console.error(data.toString()));
+      process.on('close', (code) => code === 0 ? resolve(true) : reject(new Error(`Process exited with code ${code}`)));
     });
 
     await runCommand(ffmpegPath, ['-i', videoFile, '-target', 'ntsc-dvd', '-aspect', '16:9', '-y', dvdMpegFile]);
     await runCommand(dvdauthorPath, ['-o', dvdFolder, '-t', dvdMpegFile]);
     await runCommand(mkisofsPath, ['-dvd-video', '-o', isoFile, dvdFolder]);
-    await runCommand('hdiutil', ['burn', '-device', chosenDrive, isoFile]);
 
-    // Clean up temporary files
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-    
-    return { success: true, log: `Successfully burned ${path.basename(videoFile)} to ${chosenDrive}.` };
+    if (isoOnly || noDrive) {
+      // Only generate ISO, do not burn
+      const saveResult = await dialog.showSaveDialog({
+        title: 'Save ISO File',
+        defaultPath: path.join(app.getPath('documents'), 'output.iso'),
+        filters: [{ name: 'ISO Image', extensions: ['iso'] }],
+      });
+      if (saveResult.canceled || !saveResult.filePath) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+        return { success: false, error: 'ISO save was canceled.' };
+      }
+      fs.copyFileSync(isoFile, saveResult.filePath);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      return { success: true, log: `ISO file saved to ${saveResult.filePath}` };
+    } else {
+      await runCommand('hdiutil', ['burn', '-device', chosenDrive, isoFile]);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      return { success: true, log: `Successfully burned ${path.basename(videoFile)} to ${chosenDrive}.` };
+    }
   } catch (e) {
     return { success: false, error: `An error occurred during the process: ${e.message}` };
   }
