@@ -11,7 +11,7 @@ const execPromise = util.promisify(exec);
 // --- Define paths to our bundled tools ---
 // This logic correctly finds the binaries whether in development or a packaged app
 const resourcesPath = app.isPackaged
-  ? path.join(process.resourcesPath, 'resources')
+  ? process.resourcesPath
   : path.join(app.getAppPath(), 'resources');
 
 const ffmpegPath = path.join(resourcesPath, 'bin', 'ffmpeg');
